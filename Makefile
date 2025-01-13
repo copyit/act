@@ -54,16 +54,10 @@ lint-md:
 .PHONY: lint-rest
 lint-rest:
 	docker run --rm -it \
-		-e 'RUN_LOCAL=true' \
-		-e 'FILTER_REGEX_EXCLUDE=.*testdata/*' \
-		-e 'VALIDATE_BASH=false' \
-		-e 'VALIDATE_DOCKERFILE=false' \
-		-e 'VALIDATE_DOCKERFILE_HADOLINT=false' \
-		-e 'VALIDATE_GO=false' \
-		-e 'VALIDATE_JSCPD=false' \
-		-e 'VALIDATE_SHELL_SHFMT=false' \
 		-v $(PWD):/tmp/lint \
-		github/super-linter
+		-e GITHUB_STATUS_REPORTER=false \
+		-e GITHUB_COMMENT_REPORTER=false \
+		megalinter/megalinter-go:v5
 
 .PHONY: lint
 lint: lint-go lint-rest
@@ -102,12 +96,23 @@ ifneq ($(shell git status -s),)
 	@echo "Unable to promote a dirty workspace"
 	@exit 1
 endif
+	echo -n $(NEW_VERSION) > VERSION
+	git add VERSION
+	git commit -m "chore: bump VERSION to $(NEW_VERSION)"
 	git tag -a -m "releasing v$(NEW_VERSION)" v$(NEW_VERSION)
+	git push origin master
 	git push origin v$(NEW_VERSION)
 
 .PHONY: snapshot
 snapshot:
 	goreleaser build \
-		--rm-dist \
+		--clean \
 		--single-target \
 		--snapshot
+
+.PHONY: clean all
+
+.PHONY: upgrade
+upgrade:
+	go get -u
+	go mod tidy

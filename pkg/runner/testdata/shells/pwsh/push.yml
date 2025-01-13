@@ -1,4 +1,6 @@
 on: push
+env:
+  MY_SHELL: pwsh
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -8,8 +10,16 @@ jobs:
           $PSVersionTable
   check-container:
     runs-on: ubuntu-latest
-    container: ghcr.io/justingrote/act-pwsh:latest
+    container: catthehacker/ubuntu:pwsh-latest
     steps:
       - shell: pwsh
         run: |
+          $PSVersionTable
+  check-job-default:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: ${{ env.MY_SHELL }}
+    steps:
+      - run: |
           $PSVersionTable

@@ -1,19 +1,23 @@
+//go:build !(WITHOUT_DOCKER || !(linux || darwin || windows || netbsd))
+
 package container
 
 import (
+	"context"
 	"strings"
 
 	"github.com/docker/cli/cli/config"
 	"github.com/docker/cli/cli/config/credentials"
-	"github.com/docker/docker/api/types"
-	log "github.com/sirupsen/logrus"
+	"github.com/docker/docker/api/types/registry"
+	"github.com/nektos/act/pkg/common"
 )
 
-func LoadDockerAuthConfig(image string) (types.AuthConfig, error) {
+func LoadDockerAuthConfig(ctx context.Context, image string) (registry.AuthConfig, error) {
+	logger := common.Logger(ctx)
 	config, err := config.Load(config.Dir())
 	if err != nil {
-		log.Warnf("Could not load docker config: %v", err)
-		return types.AuthConfig{}, err
+		logger.Warnf("Could not load docker config: %v", err)
+		return registry.AuthConfig{}, err
 	}
 
 	if !config.ContainsAuth() {
@@ -28,9 +32,30 @@ func LoadDockerAuthConfig(image string) (types.AuthConfig, error) {
 
 	authConfig, err := config.GetAuthConfig(hostName)
 	if err != nil {
-		log.Warnf("Could not get auth config from docker config: %v", err)
-		return types.AuthConfig{}, err
+		logger.Warnf("Could not get auth config from docker config: %v", err)
+		return registry.AuthConfig{}, err
 	}
 
-	return types.AuthConfig(authConfig), nil
+	return registry.AuthConfig(authConfig), nil
+}
+
+func LoadDockerAuthConfigs(ctx context.Context) map[string]registry.AuthConfig {
+	logger := common.Logger(ctx)
+	config, err := config.Load(config.Dir())
+	if err != nil {
+		logger.Warnf("Could not load docker config: %v", err)
+		return nil
+	}
+
+	if !config.ContainsAuth() {
+		config.CredentialsStore = credentials.DetectDefaultStore(config.CredentialsStore)
+	}
+
+	creds, _ := config.GetAllCredentials()
+	authConfigs := make(map[string]registry.AuthConfig, len(creds))
+	for k, v := range creds {
+		authConfigs[k] = registry.AuthConfig(v)
+	}
+
+	return authConfigs
 }

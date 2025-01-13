@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,40 +14,50 @@ import (
 	"testing/fstest"
 
 	"github.com/julienschmidt/httprouter"
-	"github.com/nektos/act/pkg/model"
-	"github.com/nektos/act/pkg/runner"
 	log "github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/nektos/act/pkg/model"
+	"github.com/nektos/act/pkg/runner"
 )
 
-type MapFsImpl struct {
-	fstest.MapFS
+type writableMapFile struct {
+	fstest.MapFile
 }
 
-func (fsys MapFsImpl) MkdirAll(path string, perm fs.FileMode) error {
-	// mocked no-op
-	return nil
-}
-
-type WritableFile struct {
-	fs.File
-	fsys fstest.MapFS
-	path string
-}
-
-func (file WritableFile) Write(data []byte) (int, error) {
-	file.fsys[file.path].Data = data
+func (f *writableMapFile) Write(data []byte) (int, error) {
+	f.Data = data
 	return len(data), nil
 }
 
-func (fsys MapFsImpl) Open(path string) (fs.File, error) {
-	var file = fstest.MapFile{
-		Data: []byte("content2"),
-	}
-	fsys.MapFS[path] = &file
+func (f *writableMapFile) Close() error {
+	return nil
+}
 
-	result, err := fsys.MapFS.Open(path)
-	return WritableFile{result, fsys.MapFS, path}, err
+type writeMapFS struct {
+	fstest.MapFS
+}
+
+func (fsys writeMapFS) OpenWritable(name string) (WritableFile, error) {
+	var file = &writableMapFile{
+		MapFile: fstest.MapFile{
+			Data: []byte("content2"),
+		},
+	}
+	fsys.MapFS[name] = &file.MapFile
+
+	return file, nil
+}
+
+func (fsys writeMapFS) OpenAppendable(name string) (WritableFile, error) {
+	var file = &writableMapFile{
+		MapFile: fstest.MapFile{
+			Data: []byte("content2"),
+		},
+	}
+	fsys.MapFS[name] = &file.MapFile
+
+	return file, nil
 }
 
 func TestNewArtifactUploadPrepare(t *testing.T) {
@@ -57,7 +66,7 @@ func TestNewArtifactUploadPrepare(t *testing.T) {
 	var memfs = fstest.MapFS(map[string]*fstest.MapFile{})
 
 	router := httprouter.New()
-	uploads(router, MapFsImpl{memfs})
+	uploads(router, "artifact/server/path", writeMapFS{memfs})
 
 	req, _ := http.NewRequest("POST", "http://localhost/_apis/pipelines/workflows/1/artifacts", nil)
 	rr := httptest.NewRecorder()
@@ -83,7 +92,7 @@ func TestArtifactUploadBlob(t *testing.T) {
 	var memfs = fstest.MapFS(map[string]*fstest.MapFile{})
 
 	router := httprouter.New()
-	uploads(router, MapFsImpl{memfs})
+	uploads(router, "artifact/server/path", writeMapFS{memfs})
 
 	req, _ := http.NewRequest("PUT", "http://localhost/upload/1?itemPath=some/file", strings.NewReader("content"))
 	rr := httptest.NewRecorder()
@@ -101,7 +110,7 @@ func TestArtifactUploadBlob(t *testing.T) {
 	}
 
 	assert.Equal("success", response.Message)
-	assert.Equal("content", string(memfs["1/some/file"].Data))
+	assert.Equal("content", string(memfs["artifact/server/path/1/some/file"].Data))
 }
 
 func TestFinalizeArtifactUpload(t *testing.T) {
@@ -110,7 +119,7 @@ func TestFinalizeArtifactUpload(t *testing.T) {
 	var memfs = fstest.MapFS(map[string]*fstest.MapFile{})
 
 	router := httprouter.New()
-	uploads(router, MapFsImpl{memfs})
+	uploads(router, "artifact/server/path", writeMapFS{memfs})
 
 	req, _ := http.NewRequest("PATCH", "http://localhost/_apis/pipelines/workflows/1/artifacts", nil)
 	rr := httptest.NewRecorder()
@@ -134,13 +143,13 @@ func TestListArtifacts(t *testing.T) {
 	assert := assert.New(t)
 
 	var memfs = fstest.MapFS(map[string]*fstest.MapFile{
-		"1/file.txt": {
+		"artifact/server/path/1/file.txt": {
 			Data: []byte(""),
 		},
 	})
 
 	router := httprouter.New()
-	downloads(router, memfs)
+	downloads(router, "artifact/server/path", memfs)
 
 	req, _ := http.NewRequest("GET", "http://localhost/_apis/pipelines/workflows/1/artifacts", nil)
 	rr := httptest.NewRecorder()
@@ -166,13 +175,13 @@ func TestListArtifactContainer(t *testing.T) {
 	assert := assert.New(t)
 
 	var memfs = fstest.MapFS(map[string]*fstest.MapFile{
-		"1/some/file": {
+		"artifact/server/path/1/some/file": {
 			Data: []byte(""),
 		},
 	})
 
 	router := httprouter.New()
-	downloads(router, memfs)
+	downloads(router, "artifact/server/path", memfs)
 
 	req, _ := http.NewRequest("GET", "http://localhost/download/1?itemPath=some/file", nil)
 	rr := httptest.NewRecorder()
@@ -190,7 +199,7 @@ func TestListArtifactContainer(t *testing.T) {
 	}
 
 	assert.Equal(1, len(response.Value))
-	assert.Equal("some/file/.", response.Value[0].Path)
+	assert.Equal("some/file", response.Value[0].Path)
 	assert.Equal("file", response.Value[0].ItemType)
 	assert.Equal("http://localhost/artifact/1/some/file/.", response.Value[0].ContentLocation)
 }
@@ -199,13 +208,13 @@ func TestDownloadArtifactFile(t *testing.T) {
 	assert := assert.New(t)
 
 	var memfs = fstest.MapFS(map[string]*fstest.MapFile{
-		"1/some/file": {
+		"artifact/server/path/1/some/file": {
 			Data: []byte("content"),
 		},
 	})
 
 	router := httprouter.New()
-	downloads(router, memfs)
+	downloads(router, "artifact/server/path", memfs)
 
 	req, _ := http.NewRequest("GET", "http://localhost/artifact/1/some/file", nil)
 	rr := httptest.NewRecorder()
@@ -230,8 +239,11 @@ type TestJobFileInfo struct {
 	containerArchitecture string
 }
 
-var aritfactsPath = path.Join(os.TempDir(), "test-artifacts")
-var artifactsPort = "12345"
+var (
+	artifactsPath = path.Join(os.TempDir(), "test-artifacts")
+	artifactsAddr = "127.0.0.1"
+	artifactsPort = "12345"
+)
 
 func TestArtifactFlow(t *testing.T) {
 	if testing.Short() {
@@ -240,15 +252,17 @@ func TestArtifactFlow(t *testing.T) {
 
 	ctx := context.Background()
 
-	cancel := Serve(ctx, aritfactsPath, artifactsPort)
+	cancel := Serve(ctx, artifactsPath, artifactsAddr, artifactsPort)
 	defer cancel()
 
 	platforms := map[string]string{
-		"ubuntu-latest": "node:12.20.1-buster-slim",
+		"ubuntu-latest": "node:16-buster", // Don't use node:16-buster-slim because it doesn't have curl command, which is used in the tests
 	}
 
 	tables := []TestJobFileInfo{
 		{"testdata", "upload-and-download", "push", "", platforms, ""},
+		{"testdata", "GHSL-2023-004", "push", "", platforms, ""},
+		{"testdata", "v4", "push", "", platforms, ""},
 	}
 	log.SetLevel(log.DebugLevel)
 
@@ -259,7 +273,9 @@ func TestArtifactFlow(t *testing.T) {
 
 func runTestJobFile(ctx context.Context, t *testing.T, tjfi TestJobFileInfo) {
 	t.Run(tjfi.workflowPath, func(t *testing.T) {
-		if err := os.RemoveAll(aritfactsPath); err != nil {
+		fmt.Printf("::group::%s\n", tjfi.workflowPath)
+
+		if err := os.RemoveAll(artifactsPath); err != nil {
 			panic(err)
 		}
 
@@ -274,7 +290,8 @@ func runTestJobFile(ctx context.Context, t *testing.T, tjfi TestJobFileInfo) {
 			ReuseContainers:       false,
 			ContainerArchitecture: tjfi.containerArchitecture,
 			GitHubInstance:        "github.com",
-			ArtifactServerPath:    aritfactsPath,
+			ArtifactServerPath:    artifactsPath,
+			ArtifactServerAddr:    artifactsAddr,
 			ArtifactServerPort:    artifactsPort,
 		}
 
@@ -284,13 +301,95 @@ func runTestJobFile(ctx context.Context, t *testing.T, tjfi TestJobFileInfo) {
 		planner, err := model.NewWorkflowPlanner(fullWorkflowPath, true)
 		assert.Nil(t, err, fullWorkflowPath)
 
-		plan := planner.PlanEvent(tjfi.eventName)
-
-		err = runner.NewPlanExecutor(plan)(ctx)
-		if tjfi.errorMessage == "" {
-			assert.Nil(t, err, fullWorkflowPath)
+		plan, err := planner.PlanEvent(tjfi.eventName)
+		if err == nil {
+			err = runner.NewPlanExecutor(plan)(ctx)
+			if tjfi.errorMessage == "" {
+				assert.Nil(t, err, fullWorkflowPath)
+			} else {
+				assert.Error(t, err, tjfi.errorMessage)
+			}
 		} else {
-			assert.Error(t, err, tjfi.errorMessage)
+			assert.Nil(t, plan)
 		}
+
+		fmt.Println("::endgroup::")
 	})
+}
+
+func TestMkdirFsImplSafeResolve(t *testing.T) {
+	baseDir := "/foo/bar"
+
+	tests := map[string]struct {
+		input string
+		want  string
+	}{
+		"simple":         {input: "baz", want: "/foo/bar/baz"},
+		"nested":         {input: "baz/blue", want: "/foo/bar/baz/blue"},
+		"dots in middle": {input: "baz/../../blue", want: "/foo/bar/blue"},
+		"leading dots":   {input: "../../parent", want: "/foo/bar/parent"},
+		"root path":      {input: "/root", want: "/foo/bar/root"},
+		"root":           {input: "/", want: "/foo/bar"},
+		"empty":          {input: "", want: "/foo/bar"},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			assert := assert.New(t)
+			assert.Equal(tc.want, safeResolve(baseDir, tc.input))
+		})
+	}
+}
+
+func TestDownloadArtifactFileUnsafePath(t *testing.T) {
+	assert := assert.New(t)
+
+	var memfs = fstest.MapFS(map[string]*fstest.MapFile{
+		"artifact/server/path/some/file": {
+			Data: []byte("content"),
+		},
+	})
+
+	router := httprouter.New()
+	downloads(router, "artifact/server/path", memfs)
+
+	req, _ := http.NewRequest("GET", "http://localhost/artifact/2/../../some/file", nil)
+	rr := httptest.NewRecorder()
+
+	router.ServeHTTP(rr, req)
+
+	if status := rr.Code; status != http.StatusOK {
+		assert.FailNow(fmt.Sprintf("Wrong status: %d", status))
+	}
+
+	data := rr.Body.Bytes()
+
+	assert.Equal("content", string(data))
+}
+
+func TestArtifactUploadBlobUnsafePath(t *testing.T) {
+	assert := assert.New(t)
+
+	var memfs = fstest.MapFS(map[string]*fstest.MapFile{})
+
+	router := httprouter.New()
+	uploads(router, "artifact/server/path", writeMapFS{memfs})
+
+	req, _ := http.NewRequest("PUT", "http://localhost/upload/1?itemPath=../../some/file", strings.NewReader("content"))
+	rr := httptest.NewRecorder()
+
+	router.ServeHTTP(rr, req)
+
+	if status := rr.Code; status != http.StatusOK {
+		assert.Fail("Wrong status")
+	}
+
+	response := ResponseMessage{}
+	err := json.Unmarshal(rr.Body.Bytes(), &response)
+	if err != nil {
+		panic(err)
+	}
+
+	assert.Equal("success", response.Message)
+	assert.Equal("content", string(memfs["artifact/server/path/1/some/file"].Data))
 }
